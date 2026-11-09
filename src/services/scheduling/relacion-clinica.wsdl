@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CONTRATO WSDL de la interfaz IRelacionClinica (scheduling-service).
+
+  TFU5 - Migracion REST -> SOAP. En la TFU4 esta operacion era
+      GET /api/scheduling/internal/relacion?medicoId=..&pacienteId=..  -> {"consultaEnCurso": true}
+  Ahora se expone como servicio SOAP 1.1, estilo document/literal, con
+  mensajes XML validados contra el XSD de abajo.
+
+  Por que ESTA operacion: es la unica interaccion que en la arquitectura de
+  eventos sigue siendo SINCRONA a proposito. records-service decide si un
+  medico puede leer una historia clinica y necesita el dato FRESCO (no una
+  replica eventual): un permiso concedido con datos viejos es un incidente de
+  confidencialidad. Un contrato formal y tipado (WSDL + XSD) es lo habitual
+  para este tipo de interfaces de interoperabilidad en salud.
+-->
+<definitions name="RelacionClinicaService"
+             targetNamespace="urn:clinicare:scheduling:relacion-clinica:v1"
+             xmlns="http://schemas.xmlsoap.org/wsdl/"
+             xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+             xmlns:tns="urn:clinicare:scheduling:relacion-clinica:v1"
+             xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+  <types>
+    <xsd:schema targetNamespace="urn:clinicare:scheduling:relacion-clinica:v1"
+                elementFormDefault="qualified">
+
+      <xsd:simpleType name="Uuid">
+        <xsd:restriction base="xsd:string">
+          <xsd:pattern value="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"/>
+        </xsd:restriction>
+      </xsd:simpleType>
+
+      <xsd:element name="ConsultarRelacionClinicaRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="medicoId"   type="tns:Uuid"/>
+            <xsd:element name="pacienteId" type="tns:Uuid"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="ConsultarRelacionClinicaResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="consultaEnCurso" type="xsd:boolean"/>
+            <xsd:element name="citaId"          type="tns:Uuid" minOccurs="0"/>
+            <xsd:element name="consultadoEn"    type="xsd:dateTime"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+    </xsd:schema>
+  </types>
+
+  <message name="ConsultarRelacionClinicaInput">
+    <part name="parameters" element="tns:ConsultarRelacionClinicaRequest"/>
+  </message>
+  <message name="ConsultarRelacionClinicaOutput">
+    <part name="parameters" element="tns:ConsultarRelacionClinicaResponse"/>
+  </message>
+
+  <portType name="RelacionClinicaPortType">
+    <operation name="ConsultarRelacionClinica">
+      <documentation>Indica si el medico tiene una consulta EN_CURSO con el paciente.</documentation>
+      <input  message="tns:ConsultarRelacionClinicaInput"/>
+      <output message="tns:ConsultarRelacionClinicaOutput"/>
+    </operation>
+  </portType>
+
+  <binding name="RelacionClinicaBinding" type="tns:RelacionClinicaPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <operation name="ConsultarRelacionClinica">
+      <soap:operation soapAction="urn:clinicare:scheduling:relacion-clinica:v1#ConsultarRelacionClinica"/>
+      <input><soap:body use="literal"/></input>
+      <output><soap:body use="literal"/></output>
+    </operation>
+  </binding>
+
+  <service name="RelacionClinicaService">
+    <port name="RelacionClinicaPort" binding="tns:RelacionClinicaBinding">
+      <!-- El host real lo resuelve el DNS interno de Docker (scheduling:3000). -->
+      <soap:address location="http://scheduling:3000/soap/relacion-clinica"/>
+    </port>
+  </service>
+</definitions>

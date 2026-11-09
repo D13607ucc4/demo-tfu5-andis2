@@ -1,0 +1,36 @@
+@startuml
+!include estilo.iuml
+title Secuencia TFU5 - Acceso a la historia clínica (única interacción síncrona: SOAP)
+autonumber "<b>0."
+
+actor "Médico" as med
+participant "Gatekeeper" as gk
+participant "records-service" as rec
+participant "Cliente SOAP\n+ Circuit Breaker\n(en records)" as cb
+participant "scheduling-service\n/soap/relacion-clinica" as sch
+database "PostgreSQL\nscheduling" as dbs
+database "PostgreSQL\nrecords" as dbr
+
+med -> gk : GET /api/records/pacientes/{id}/historia
+gk -> rec : reenvía (JWT + rol validados)
+rec -> cb : consultarRelacionClinica(medicoId, pacienteId)
+alt circuito CLOSED / HALF_OPEN
+  cb -> sch : POST SOAP Envelope\nConsultarRelacionClinicaRequest\n(X-Internal-Token, timeout 3 s)
+  sch -> dbs : SELECT cita EN_CURSO
+  alt hay consulta en curso
+    sch --> cb : ConsultarRelacionClinicaResponse\nconsultaEnCurso=true, citaId
+    cb --> rec : permitido
+    rec -> dbr : INSERT auditoría (PERMITIDO)\nSELECT historia, entradas, recetas
+    rec --> med : 200 historia clínica
+  else no hay consulta
+    sch --> cb : consultaEnCurso=false
+    cb --> rec : denegado
+    rec -> dbr : INSERT auditoría (DENEGADO)
+    rec --> med : 403 Acceso denegado
+  end
+else scheduling no responde (timeout) o circuito OPEN
+  cb --> rec : fallo (al llegar a 5 fallos el circuito pasa a OPEN\ny las siguientes llamadas fallan al instante)
+  rec -> dbr : INSERT auditoría (DENEGADO)
+  rec --> med : 403 (fail-secure: sin verificación no hay acceso)
+end
+@enduml

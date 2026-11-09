@@ -1,0 +1,27 @@
+@startuml
+!include estilo.iuml
+title Secuencia TFU4 (estilo anterior) - Solicitud de retiro con integración síncrona
+autonumber "<b>0."
+actor "Paciente" as pac
+participant "Gatekeeper" as gk
+participant "pharmacy-service" as ph
+participant "records-service" as rec
+database "PostgreSQL" as db
+queue "Redis\n(stream sin persistencia)" as rd
+participant "queue-service" as q
+
+pac -> gk : POST /api/pharmacy/retiros
+gk -> ph : reenvía
+ph -> rec : GET /internal/recetas/{id}  (REST síncrono,\ntimeout 3 s, 2 reintentos, circuit breaker)
+alt records responde
+  rec --> ph : 200 receta
+  ph -> db : BEGIN; INSERT retiro; COMMIT
+  ph -> rd : XADD (fire and forget, fuera de la transacción)
+  ph -> rec : POST /internal/recetas/{id}/estado
+  ph --> pac : 201 ticket
+  rd -->> q : evento -> ticket en la cola
+else records caído / colgado
+  rec --> ph : timeout (o 503 inmediato si el circuito está OPEN)
+  ph --> pac : 503 - no se puede retirar
+end
+@enduml

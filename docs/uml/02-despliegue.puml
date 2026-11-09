@@ -1,0 +1,85 @@
+@startuml
+!include estilo.iuml
+skinparam nodesep 30
+skinparam ranksep 50
+title ClíniCare TFU5 - Diagrama de despliegue (Docker Compose)
+
+node "Cliente\n(navegador / app / curl)" as cli <<device>>
+
+node "Host Docker\n(PC del equipo o Azure VM)" as host <<device>> {
+  node "Docker Engine" as eng <<executionEnvironment>> {
+
+    frame "red edge (bridge)" as edge {
+      node "gateway\nnginx:1.27-alpine" as gw <<container>> {
+        artifact "nginx.conf" as ngconf
+        artifact "certs TLS" as certs
+      }
+    }
+
+    node "gatekeeper\nnode:20-alpine" as gk <<container>> {
+      artifact "gatekeeper/index.js" as agk
+    }
+
+    frame "red clinicare (bridge, interna)" as net {
+      node "auth\nnode:20-alpine" as auth <<container>> {
+        artifact "auth/index.js" as aauth
+      }
+      node "scheduling\nnode:20-alpine" as sch <<container>> {
+        artifact "scheduling/index.js" as asch
+        artifact "relacion-clinica.wsdl" as wsdl
+      }
+      node "records\nnode:20-alpine" as rec <<container>> {
+        artifact "records/index.js" as arec
+      }
+      node "pharmacy\nnode:20-alpine" as ph <<container>> {
+        artifact "pharmacy/index.js" as aph
+      }
+      node "queue  [1..N réplicas]\nnode:20-alpine" as q <<container>> {
+        artifact "queue/index.js" as aq
+      }
+      node "notifications\nnode:20-alpine" as notif <<container>> {
+        artifact "notifications/index.js" as an
+      }
+      node "broker\nredis:7-alpine (AOF)" as broker <<container>> {
+        artifact "streams eventos:*" as streams
+      }
+      node "redis\nredis:7-alpine (sin persistencia)" as redis <<container>> {
+        artifact "cache + cola + bandejas" as soft
+      }
+      node "postgres\npostgres:16-alpine" as pg <<container>> {
+        artifact "init.sql (esquemas,\noutbox, inbox)" as sql
+      }
+    }
+  }
+  database "volumen datos-pg" as vpg
+  database "volumen datos-broker" as vbr
+}
+
+cli -down-> gw : HTTPS :8443 / HTTP :8080
+gw -down-> gk : HTTP (red edge)
+gk -down-> auth : HTTP REST
+gk -down-> sch : HTTP REST
+gk -down-> rec : HTTP REST
+gk -down-> ph : HTTP REST
+gk -down-> q : HTTP REST
+gk -down-> notif : HTTP REST
+rec -right-> sch : SOAP/XML sobre HTTP
+rec -down-> broker : RESP (TCP 6379)
+ph -down-> broker : RESP
+q -down-> broker : RESP
+notif -down-> broker : RESP
+q -down-> redis : RESP
+notif -down-> redis : RESP
+sch -down-> redis : RESP
+auth -down-> pg : TCP 5432
+sch -down-> pg : TCP 5432
+rec -down-> pg : TCP 5432
+ph -down-> pg : TCP 5432
+pg -down- vpg
+broker -down- vbr
+
+note right of gk
+  Único contenedor en las dos redes:
+  es la única puerta a la red interna.
+end note
+@enduml

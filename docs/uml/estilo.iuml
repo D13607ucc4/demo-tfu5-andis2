@@ -1,0 +1,16 @@
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam dpi 150
+skinparam componentStyle uml2
+skinparam ArrowColor #444444
+skinparam ComponentBorderColor #444444
+skinparam ComponentBackgroundColor #FFFFFF
+skinparam NodeBackgroundColor #F7F7F7
+skinparam DatabaseBackgroundColor #FFFFFF
+skinparam QueueBackgroundColor #FFF4E0
+skinparam InterfaceBackgroundColor #FFFFFF
+skinparam noteBackgroundColor #FFFDE7
+skinparam noteBorderColor #BBBBBB
+skinparam packageBackgroundColor #FCFCFC
+skinparam SequenceLifeLineBorderColor #888888
+skinparam ParticipantBackgroundColor #FFFFFF

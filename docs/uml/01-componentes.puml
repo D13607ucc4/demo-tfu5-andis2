@@ -1,0 +1,89 @@
+@startuml
+!include estilo.iuml
+skinparam nodesep 40
+skinparam ranksep 70
+title ClíniCare TFU5 - Diagrama de componentes (EDA, topología broker)
+
+actor "Paciente / Médico / Farmacéutico" as user
+interface "API REST pública (HTTPS :8443)" as IApi
+component "Gateway (nginx)\n<<TLS, rate limiting, offloading>>" as gw
+component "Gatekeeper\n<<JWT, RBAC, saneamiento>>" as gk
+user -down-> IApi
+IApi -down- gw
+gw -down-> gk
+
+component "auth-service\n\nlogin, emisión de JWT" as auth
+component "scheduling-service\n\nagenda, citas (ACID),\ncache-aside" as sch
+component "records-service\n\nhistoria clínica, recetas,\nauditoría\n--\noutbox relay\ncliente SOAP + circuit breaker\nconsumidor idempotente" as rec
+component "pharmacy-service\n\nretiros, réplica local\nde recetas\n--\noutbox relay\nconsumidor idempotente" as ph
+component "queue-service\n\ncola híbrida FIFO\n(N réplicas, competing\nconsumers)" as q
+component "notifications-service\n\nbandeja del paciente\n--\nconsumidor idempotente" as notif
+
+auth -[hidden]right- sch
+sch -[hidden]right- rec
+rec -[hidden]right- ph
+ph -[hidden]right- q
+q -[hidden]right- notif
+
+interface "IAutenticacion" as IAuth
+interface "IAgenda" as IAgenda
+interface "IHistoriaClinica" as IHist
+interface "IFarmacia" as IFarm
+interface "ICola" as ICola
+interface "INotificaciones" as INotif
+gk ..> IAuth
+gk ..> IAgenda
+gk ..> IHist
+gk ..> IFarm
+gk ..> ICola
+gk ..> INotif
+IAuth -down- auth
+IAgenda -down- sch
+IHist -down- rec
+IFarm -down- ph
+ICola -down- q
+INotif -down- notif
+
+interface "IRelacionClinica\n(SOAP 1.1, WSDL)" as IRel
+sch -down- IRel
+rec .left.> IRel : <<SOAP/XML>>\nsíncrono
+
+component "Broker de eventos (Redis Streams + AOF)" as broker {
+  queue "eventos:recetas" as TRec
+  queue "eventos:retiros" as TRet
+  queue "eventos:turnos" as TTur
+  queue "eventos:dlq" as TDlq
+}
+TRec -[hidden]right- TRet
+TRet -[hidden]right- TTur
+TTur -[hidden]right- TDlq
+
+rec -down-> TRec : publica\nRecetaEmitida
+TRec .up.> ph : consume
+ph -down-> TRet : publica\nRetiroSolicitado
+q -down-> TRet : publica\nRetiroAtendido
+TRet .up.> rec : consume
+TRet .up.> q : consume
+TRet .up.> notif : consume
+TRet .up.> ph : consume
+q -down-> TTur : publica\nTurno*
+TTur .up.> notif : consume
+
+database "PostgreSQL\nun esquema por servicio\n(outbox + inbox en records y pharmacy)" as pg
+database "Redis cache / cola\n(estado blando)" as redis
+broker -[hidden]down- pg
+broker -[hidden]down- redis
+auth -down-> pg
+sch -down-> pg
+rec -down-> pg
+ph -down-> pg
+sch -down-> redis
+q -down-> redis
+notif -down-> redis
+
+note right of TDlq
+  Fan-out: un consumer group por servicio
+  interesado. Entrega at-least-once;
+  tras 3 fallos el evento pasa a la DLQ.
+end note
+@enduml

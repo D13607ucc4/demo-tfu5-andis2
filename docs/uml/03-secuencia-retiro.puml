@@ -1,0 +1,74 @@
+@startuml
+!include estilo.iuml
+title Secuencia TFU5 - Emitir receta, solicitar y entregar el retiro (coreografía de eventos)
+autonumber "<b>0."
+
+actor "Médico" as med
+actor "Paciente" as pac
+actor "Farmacéutico" as far
+participant "Gatekeeper" as gk
+participant "records-service" as rec
+database "PostgreSQL\nrecords" as dbr
+participant "pharmacy-service" as ph
+database "PostgreSQL\npharmacy" as dbp
+queue "Broker\n(eventos:*)" as br
+participant "queue-service" as q
+participant "notifications-service" as nt
+
+== Emisión de la receta ==
+med -> gk : POST /api/records/recetas
+gk -> rec : reenvía (JWT validado)
+rec -> rec : autorización (ver diagrama de acceso: SOAP)
+rec -> dbr : BEGIN; INSERT receta + auditoría\n+ INSERT outbox(RecetaEmitida); COMMIT
+rec --> med : 201 Receta emitida
+...relay del outbox (cada 200 ms)...
+rec -> dbr : SELECT pendientes FOR UPDATE SKIP LOCKED
+rec -> br : XADD eventos:recetas RecetaEmitida
+rec -> dbr : UPDATE outbox SET publicado_en
+br -->> ph : RecetaEmitida (grupo pharmacy)
+ph -> dbp : BEGIN; INSERT inbox(id evento)\n+ INSERT recetas (réplica); COMMIT
+ph -> br : XACK
+
+== Solicitud del retiro (sin llamadas a records) ==
+pac -> gk : POST /api/pharmacy/retiros {recetaId}
+gk -> ph : reenvía
+ph -> dbp : BEGIN; SELECT receta (réplica) FOR UPDATE\nINSERT retiro; UPDATE receta EN_RETIRO\nINSERT outbox(RetiroSolicitado); COMMIT
+ph --> pac : 201 {ticket F-001}
+...relay del outbox...
+ph -> br : XADD eventos:retiros RetiroSolicitado
+par fan-out: cada grupo recibe el evento
+  br -->> q : RetiroSolicitado (grupo-cola)
+  q -> q : ticket F-001 a la cola (idempotente)
+  q -> br : XACK
+else
+  br -->> rec : RetiroSolicitado (grupo records)
+  rec -> dbr : inbox + receta EN_RETIRO
+  rec -> br : XACK
+else
+  br -->> nt : RetiroSolicitado (grupo notifications)
+  nt -> nt : SET NX procesado:id + aviso al paciente
+  nt -> br : XACK
+end
+
+== Entrega en el mostrador ==
+far -> gk : POST /api/queue/farmacia/siguiente
+gk -> q : reenvía
+q -> br : XADD eventos:retiros RetiroAtendido\n(del ticket anterior)
+q -> br : XADD eventos:turnos TurnoLlamado
+q --> far : 200 Turno llamado
+par
+  br -->> ph : RetiroAtendido
+  ph -> dbp : inbox + retiro ATENDIDO + receta RETIRADA
+else
+  br -->> rec : RetiroAtendido
+  rec -> dbr : inbox + receta RETIRADA
+else
+  br -->> nt : TurnoLlamado
+  nt -> nt : "Es tu turno" en la bandeja
+end
+
+note over rec, br
+  Si records está caído, los pasos de la solicitud del retiro no cambian:
+  los eventos para records esperan en el broker y se procesan al volver.
+end note
+@enduml

@@ -1,0 +1,14 @@
+{
+  "name": "clinicare-tfu",
+  "version": "1.0.0",
+  "description": "TFU UT3 - Red de clinicas de atencion primaria",
+  "private": true,
+  "dependencies": {
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.5",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.12.0",
+    "redis": "^4.7.0",
+    "soap": "^1.14.0"
+  }
+}

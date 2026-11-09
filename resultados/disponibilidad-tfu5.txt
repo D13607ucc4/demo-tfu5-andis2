@@ -1,0 +1,8 @@
+rama=tfu5  servicio_caido=records  N=10  fecha=2026-11-07T23:06:37-03:00
+fase                        aceptados    disp%    p50ms    p95ms    maxms
+linea de base                   10/10    100.0        7       11       11
+records caido                   10/10    100.0        6        7        7
+cola durante la caida: HTTP 200
+convergencia en records tras recuperar: 10/10 recetas EN_RETIRO en 37ms
+codigos durante la caida: 10x201 
+ritmo: un retiro cada 0.15s (por debajo del rate limiting del gateway)

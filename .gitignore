@@ -1,0 +1,9 @@
+# Certificados TLS autofirmados generados por scripts/gen-certs.sh.
+# No se versionan: cada maquina los genera localmente.
+nginx/certs/
+
+# Dependencias de Node (si se instala fuera de Docker).
+node_modules/
+
+# Temporales de los scripts de demo.
+*.tmp

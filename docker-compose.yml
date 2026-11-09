@@ -1,0 +1,232 @@
+# Por que contenedores y no maquinas virtuales:
+#   - Arranque en segundos vs minutos, podemos escalar en caliente durante la
+#     demo (`--scale queue=3`) y mostrar el balanceo en vivo.
+#   - Imagen inmutable: lo que corre en la maquina del profesor es byte a byte
+#     lo mismo que corre en la nuestra (facilidad de despliegue).
+#   - Densidad: 10 procesos aislados en una notebook. Con VMs necesitariamos 10
+#     sistemas operativos completos.
+#
+# TOPOLOGIA DE RED (PATRON GATEKEEPER):
+#   - edge:      gateway (nginx) + gatekeeper. Unica red expuesta hacia afuera.
+#   - clinicare: todos los componentes de negocio + motores de datos.
+#   El gatekeeper es el UNICO punto en AMBAS redes: es la unica puerta a la
+#   red interna. nginx ya no habla directo con auth/scheduling/records/etc.
+
+# TFU5 - ESTILO: ARQUITECTURA BASADA EN EVENTOS (topologia broker)
+#   Los componentes de negocio ya no se llaman entre si por REST: publican y
+#   consumen eventos en el contenedor `broker`. La unica llamada sincrona que
+#   queda es SOAP (records -> scheduling, IRelacionClinica).
+
+name: clinicare-tfu
+
+x-servicio-node: &servicio-node
+  build: .
+  restart: unless-stopped
+  networks: [clinicare]
+  environment: &entorno-comun
+    NODE_ENV: production
+    PORT: 3000
+    PGHOST: postgres
+    PGPORT: 5432
+    PGUSER: clinicare
+    PGPASSWORD: clinicare
+    PGDATABASE: clinicare
+    PG_POOL_MAX: 8
+    REDIS_URL: redis://redis:6379
+    # --- TFU5: BROKER DE EVENTOS (Redis Streams con AOF, contenedor propio) ---
+    BROKER_URL: redis://broker:6379
+    EVENT_MAX_INTENTOS: "${EVENT_MAX_INTENTOS:-3}"
+    EVENT_RECLAIM_IDLE_MS: "${EVENT_RECLAIM_IDLE_MS:-3000}"
+    EVENT_RECLAIM_CADA_MS: "${EVENT_RECLAIM_CADA_MS:-2000}"
+    OUTBOX_POLL_MS: "${OUTBOX_POLL_MS:-200}"
+    SOAP_TIMEOUT_MS: "${SOAP_TIMEOUT_MS:-3000}"
+    JWT_SECRET: secreto-tfu-ut3-2026
+    INTERNAL_TOKEN: token-interno-tfu
+    AVISO_POSICION: 2
+    NOTIFICATIONS_URL: http://notifications:3000
+    # --- PATRON 1: CIRCUIT BREAKER (+ retry) ---
+    CB_FAILURE_THRESHOLD: "${CB_FAILURE_THRESHOLD:-5}"
+    CB_OPEN_MS: "${CB_OPEN_MS:-10000}"
+    CB_RETRIES: "${CB_RETRIES:-2}"
+    CB_RETRY_BASE_MS: "${CB_RETRY_BASE_MS:-100}"
+    # --- PATRON 3: CACHE-ASIDE ---
+    CACHE_ENABLED: "${CACHE_ENABLED:-true}"
+    CACHE_TTL_CATALOGO: "${CACHE_TTL_CATALOGO:-300}"
+    CACHE_TTL_SLOTS: "${CACHE_TTL_SLOTS:-30}"
+    CACHE_TIMEOUT_MS: "${CACHE_TIMEOUT_MS:-200}"
+    # --- PATRON 4: QUEUE-BASED LOAD LEVELING ---
+    STREAM_MAXLEN: "${STREAM_MAXLEN:-10000}"
+    CONSUMER_DELAY_MS: "${CONSUMER_DELAY_MS:-0}"
+    # --- PATRON 5: GATEKEEPER (defensa en profundidad) ---
+    GATEKEEPER_ONLY: "${GATEKEEPER_ONLY:-true}"
+    GATEKEEPER_TOKEN: "${GATEKEEPER_TOKEN:-gatekeeper-dev-token}"
+    GATEKEEPER_MAX_BODY: "${GATEKEEPER_MAX_BODY:-100kb}"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    broker:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/healthz', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+    interval: 5s
+    timeout: 3s
+    retries: 5
+    start_period: 5s
+
+services:
+
+  # PERSISTENCIA ACID
+  postgres:
+    image: postgres:16-alpine
+    networks: [clinicare]
+    environment:
+      POSTGRES_USER: clinicare
+      POSTGRES_PASSWORD: clinicare
+      POSTGRES_DB: clinicare
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - datos-pg:/var/lib/postgresql/data
+    # PATRON GATEKEEPER: cerramos el borde, la base ya NO se publica al host.
+    # Para inspeccionarla con un cliente externo durante la demo, descomentar:
+    # ports:
+    #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinicare -d clinicare"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # PERSISTENCIA BASE (cola hibrida + notificaciones + stream de eventos)
+  redis:
+    image: redis:7-alpine
+    networks: [clinicare]
+    # appendonly no: priorizamos latencia sobre durabilidad. La cola es estado
+    # blando (soft state) del dia; si se pierde, se reconstruye desde PostgreSQL.
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # TFU5 - BROKER DE EVENTOS (topologia broker de la arquitectura EDA)
+  # Separado del Redis de cache/cola a proposito:
+  #  - distinta politica de durabilidad: los eventos son la integracion entre
+  #    componentes, tienen que sobrevivir a un reinicio (AOF, fsync cada 1s);
+  #    el cache y la cola del dia siguen siendo estado blando (sin persistencia);
+  #  - un FLUSHALL del cache (script 9) ya no borra eventos en vuelo.
+  broker:
+    image: redis:7-alpine
+    networks: [clinicare]
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - datos-broker:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # COMPONENTES DE NEGOCIO (todos sin estado -> replicables)
+  auth:
+    <<: *servicio-node
+    command: ["node", "src/services/auth/index.js"]
+    environment:
+      <<: *entorno-comun
+      SERVICE_NAME: auth-service
+
+  scheduling:
+    <<: *servicio-node
+    command: ["node", "src/services/scheduling/index.js"]
+    environment:
+      <<: *entorno-comun
+      SERVICE_NAME: scheduling-service
+
+  records:
+    <<: *servicio-node
+    command: ["node", "src/services/records/index.js"]
+    environment:
+      <<: *entorno-comun
+      SERVICE_NAME: records-service
+      # TFU5: el circuit breaker ahora protege records -> scheduling (SOAP).
+      # Ventana corta para que el script 7 sea agil.
+      CB_OPEN_MS: "${CB_OPEN_MS:-5000}"
+
+  pharmacy:
+    <<: *servicio-node
+    command: ["node", "src/services/pharmacy/index.js"]
+    environment:
+      <<: *entorno-comun
+      SERVICE_NAME: pharmacy-service
+      # Ventana del circuito mas corta en pharmacy para que el script 7 sea agil.
+      CB_OPEN_MS: "${CB_OPEN_MS:-5000}"
+
+  queue:
+    <<: *servicio-node
+    command: ["node", "src/services/queue/index.js"]
+    environment:
+      <<: *entorno-comun
+      SERVICE_NAME: queue-service
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  notifications:
+    <<: *servicio-node
+    command: ["node", "src/services/notifications/index.js"]
+    environment:
+      <<: *entorno-comun
+      SERVICE_NAME: notifications-service
+
+  # PATRON 5 - GATEKEEPER: unica puerta de entrada a la red clinicare.
+  # Vive en las DOS redes: recibe de nginx (edge) y habla con los servicios
+  # (clinicare). Ningun otro contenedor esta en ambas.
+  gatekeeper:
+    <<: *servicio-node
+    command: ["node", "src/services/gatekeeper/index.js"]
+    networks: [edge, clinicare]
+    environment:
+      <<: *entorno-comun
+      SERVICE_NAME: gatekeeper
+      GATEKEEPER_TOKEN: "${GATEKEEPER_TOKEN:-gatekeeper-dev-token}"
+
+  # PATRON 6 - GATEWAY OFFLOADING: TLS, cabeceras de seguridad, gzip y limite
+  # de cuerpo en el borde. En la red edge, solo conectado al gatekeeper.
+  gateway:
+    image: nginx:1.27-alpine
+    networks: [edge]
+    ports:
+      - "8080:80"          # HTTP: compatibilidad con los scripts 0-6
+      - "8443:443"         # HTTPS: TLS terminado aca, adentro va HTTP plano
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      gatekeeper:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1 y no localhost: dentro del contenedor "localhost" resuelve
+      # primero a ::1 y nginx escucha solo en IPv4 (0.0.0.0).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  edge:
+    driver: bridge
+  clinicare:
+    driver: bridge
+
+volumes:
+  datos-pg:
+  datos-broker:
