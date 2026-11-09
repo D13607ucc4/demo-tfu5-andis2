@@ -4,7 +4,7 @@ Demo de arquitectura que evoluciona por unidad: componentes e interfaces,
 escalabilidad, ACID + BASE (TFU3), patrones de atributos de calidad (TFU4) y,
 en esta rama, **cambio de estilo a Arquitectura Basada en Eventos (TFU5)**.
 
-## TFU5 - Arquitectura basada en eventos (rama `tfu5`)
+## TFU5 - Arquitectura basada en eventos
 
 En la TFU4 los componentes se integraban por **REST sincrono** (pharmacy le
 preguntaba a records por cada receta, queue le avisaba a pharmacy cada
